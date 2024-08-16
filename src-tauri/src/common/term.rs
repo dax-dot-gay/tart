@@ -59,9 +59,7 @@ pub mod terminal {
     pub struct Terminal {
         pub info: TermInfo,
         pub ptys: PtyPair,
-        pub child: Box<dyn Child + Send + Sync>,
-        pub reader: Box<dyn Read + Send>,
-        pub writer: Box<dyn Write + Send>
+        pub child: Box<dyn Child + Send + Sync>
     }
 
     impl Terminal {
@@ -86,9 +84,7 @@ pub mod terminal {
             Ok(Terminal {
                 info,
                 ptys: pty,
-                child,
-                reader,
-                writer
+                child
             })
         }
 
@@ -108,7 +104,7 @@ pub mod terminal {
             self.info.id
         }
 
-        pub fn read(&mut self) -> Result<String, TerminalError> {
+        /*pub fn read(&mut self) -> Result<String, TerminalError> {
             if self.status().is_some() {
                 return Err(TerminalError::ClosedPty);
             }
@@ -123,7 +119,7 @@ pub mod terminal {
             }
             self.writer.write_all(content.as_bytes()).map_err(|_| TerminalError::Write)?;
             Ok(())
-        }
+        }*/
 
         pub fn kill(&mut self) -> Result<(), TerminalError> {
             if self.status().is_some() {
