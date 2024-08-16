@@ -19,4 +19,8 @@ tauri = { version = "2.0.0-rc", features = [] }
 tauri-plugin-shell = "2.0.0-rc"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+portable-pty = "0.8.1"
+notify = "6.1.1"
+uuid = { version = "1.10.0", features = ["serde", "v4"]}
+snafu = "0.8.4"
 
