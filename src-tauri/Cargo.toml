@@ -23,4 +23,5 @@ portable-pty = "0.8.1"
 notify = "6.1.1"
 uuid = { version = "1.10.0", features = ["serde", "v4"]}
 snafu = "0.8.4"
+crossbeam-channel = "0.5.13"
 
