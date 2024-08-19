@@ -1,3 +1,4 @@
+use common::app_state::AppState;
 use tauri::Manager;
 
 mod common;
@@ -6,6 +7,7 @@ mod common;
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            app.manage(AppState::new());
             Ok(())
         })
         .run(tauri::generate_context!())
