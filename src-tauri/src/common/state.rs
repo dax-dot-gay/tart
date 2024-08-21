@@ -1,12 +1,13 @@
 pub mod app_state {
     use std::sync::{Arc, Mutex};
 
+    use portable_pty::PtySize;
     use serde::{Deserialize, Serialize};
     use serde_json::Value;
     use tauri::{AppHandle, Emitter, Listener, Manager};
     use uuid::Uuid;
 
-    use crate::common::term::{TerminalCommand, TerminalInfo, TerminalManager, TerminalMessage};
+    use crate::common::term::{PtySizeDef, TerminalCommand, TerminalInfo, TerminalManager, TerminalMessage};
 
     #[derive(Clone, Debug)]
     pub struct AppState {
@@ -17,8 +18,15 @@ pub mod app_state {
     #[serde(tag = "type")]
     pub enum AppCommand {
         CreateTerminal{command: String, args: Option<Vec<String>>, title: Option<String>},
+        RemoveTerminal{id: Uuid},
         WriteData{id: Uuid, data: String},
-        GetTerminals{}
+        GetTerminals{},
+        Resize{
+            id: Uuid, 
+
+            #[serde(with = "PtySizeDef")]
+            size: PtySize
+        }
     }
 
     impl AppCommand {
@@ -56,7 +64,15 @@ pub mod app_state {
     #[derive(Serialize, Deserialize, Clone, Debug)]
     #[serde(tag = "type")]
     pub enum FrontendEvent {
-        TerminalRead{id: Uuid, data: String}
+        TerminalRead{id: Uuid, data: String},
+        TerminalCreated{id: Uuid},
+        TerminalRemoved{id: Uuid},
+        TerminalResized{
+            id: Uuid,
+            
+            #[serde(with = "PtySizeDef")]
+            size: PtySize
+        }
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -75,6 +91,10 @@ pub mod app_state {
     impl AppState {
         pub fn new() -> Self {
             AppState {terminals: Arc::new(Mutex::new(TerminalManager::new()))}
+        }
+
+        pub fn emit_event(&self, app: &AppHandle, event: FrontendEvent) -> () {
+            let _ = app.emit("tart://event", event);
         }
 
         pub fn run_in_background(&self, app: &AppHandle) -> () {
@@ -98,7 +118,12 @@ pub mod app_state {
                     let mut terminals = state.terminals.lock().unwrap();
                     match event.command {
                         AppCommand::CreateTerminal { ref command, ref args, ref title } => {
-                            event.emit_result(&handle, terminals.create_terminal(handle.clone(), command.clone(), args.clone(), title.clone()).and_then(|t| Ok(t.info())));
+                            let result = terminals.create_terminal(handle.clone(), command.clone(), args.clone(), title.clone()).and_then(|t| Ok(t.info()));
+                            event.emit_result(&handle, result.clone());
+                            if let Ok(created) = result {
+                                state.emit_event(&handle, FrontendEvent::TerminalCreated { id: created.id });
+                            }
+
                         },
                         AppCommand::WriteData { id, ref data } => {
                             match terminals.sender(id) {
@@ -115,7 +140,28 @@ pub mod app_state {
                                 }
                             }
                         },
-                        AppCommand::GetTerminals {  } => {event.emit_result(&handle, Ok::<Vec<TerminalInfo>, ()>(terminals.list_terminals()));}
+                        AppCommand::GetTerminals {  } => {event.emit_result(&handle, Ok::<Vec<TerminalInfo>, ()>(terminals.list_terminals()));},
+                        AppCommand::Resize { id, size } => {
+                            match terminals.sender(id) {
+                                Some(sender) => match sender.send(TerminalMessage::new(TerminalCommand::Resize { size: size.clone() })) {
+                                    Ok(_) => {
+                                        event.emit_result(&handle, Ok::<&str, &str>("Resized terminal"));
+                                        state.emit_event(&handle, FrontendEvent::TerminalResized { id, size });
+                                    },
+                                    Err(_) => event.emit_result(&handle, Err::<&str, &str>("Failed to send terminal resize command"))
+                                },
+                                None => event.emit_result(&handle, Err::<&str, &str>("Unknown terminal ID"))
+                            }
+                        },
+                        AppCommand::RemoveTerminal { id } => {
+                            if let Some(_) = terminals.terminal(id) {
+                                terminals.remove_terminal(id);
+                                event.emit_result(&handle, Ok::<&str, &str>("Removed terminal"));
+                                state.emit_event(&handle, FrontendEvent::TerminalRemoved { id });
+                            } else {
+                                event.emit_result(&handle, Err::<&str, &str>("Unknown terminal ID"));
+                            }
+                        }
                     }
                 }
             });

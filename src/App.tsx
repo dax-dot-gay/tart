@@ -1,40 +1,25 @@
 import { Button, MantineProvider } from "@mantine/core";
-import { invoke } from "@tauri-apps/api/core";
-import { listen, UnlistenFn } from "@tauri-apps/api/event";
-import { useEffect } from "react";
+import { execute } from "./api/base";
+import { useTerminals } from "./api/hooks";
 
 export function App() {
-    useEffect(() => {
-        let unlisten: UnlistenFn = () => {};
-        listen<any>("tart://event", console.log).then((v) => (unlisten = v));
-        return unlisten;
-    }, []);
+    const terminals = useTerminals();
+    console.log(terminals);
 
     return (
         <MantineProvider>
             <Button
                 onClick={() =>
-                    invoke("execute_command", {
-                        command: {
-                            type: "CreateTerminal",
-                            command: "zsh",
-                            args: null,
-                            title: null,
-                        },
+                    execute("create_terminal", {
+                        command: "zsh",
+                        args: null,
+                        title: null,
                     }).then(console.log)
                 }
             >
                 New Terminal
             </Button>
-            <Button
-                onClick={() =>
-                    invoke("execute_command", {
-                        command: {
-                            type: "GetTerminals",
-                        },
-                    }).then(console.log)
-                }
-            >
+            <Button onClick={() => execute("get_terminals").then(console.log)}>
                 List Terminals
             </Button>
         </MantineProvider>
