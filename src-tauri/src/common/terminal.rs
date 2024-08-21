@@ -17,7 +17,10 @@ pub mod term {
         TerminalFailure{id: Uuid, reason: String},
         Write(String),
         Read(String),
-        Error{scope: String, reason: String}
+        Error{scope: String, reason: String},
+
+        #[serde(with = "PtySizeDef")]
+        Resize{size: PtySize}
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -146,6 +149,11 @@ pub mod term {
                                         let _ = self.send_result(cmd.clone(), TerminalCommand::Error { scope: "pty".to_string(), reason: "write_failure".to_string() });
                                     }
                                 },
+                                TerminalCommand::Resize { size } => {
+                                    if let Err(_) = context.handle.resize(size) {
+                                        let _ = self.send_result(cmd.clone(), TerminalCommand::Error { scope: "pty".to_string(), reason: "resize_failure".to_string() });
+                                    }
+                                }
                                 _ => ()
                             }
                         }
@@ -190,16 +198,20 @@ pub mod term {
             TerminalManager { terminals: Arc::new(Mutex::new(HashMap::new())), threads: Arc::new(Mutex::new(HashMap::new())) }
         }
 
-        pub fn create_terminal(&mut self, app: AppHandle, command: String, args: Option<Vec<String>>, title: Option<String>) -> () {
+        pub fn create_terminal(&mut self, app: AppHandle, command: String, args: Option<Vec<String>>, title: Option<String>) -> Result<Terminal, &str> {
             let commands = unbounded::<TerminalMessage>();
             let results = unbounded::<TerminalMessage>();
             let term = Terminal::new((commands.0.clone(), commands.1.clone()), (results.0.clone(), results.1.clone()), command, args, title);
             if let Ok(mut terminals) = self.terminals.lock() {
                 if let Ok(mut threads) = self.threads.lock() {
+                    let cloned = term.clone();
                     terminals.insert(term.clone().id(), term.clone());
                     threads.insert(term.clone().id(), thread::spawn(move || term.run_loop(app.clone())));
+                    return Ok(cloned);
                 }   
+                return Err("Failed to lock threads mapping");
             }
+            return Err("Failed to lock terminals mapping");
         }
 
         pub fn remove_terminal(&mut self, id: Uuid) -> () {
