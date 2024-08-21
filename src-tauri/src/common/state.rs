@@ -49,7 +49,7 @@ pub mod app_state {
                 result: serialized
             };
 
-            let _ = app.emit("tart://results", res);
+            let _ = app.emit("tart://result", res);
         }
     }
 
@@ -85,7 +85,6 @@ pub mod app_state {
 
                     match event {
                         BackendEvent::TerminalRead { id, data } => {
-                            println!("{:?}: {:?}", id, data);
                             let _ = handle.emit("tart://event", FrontendEvent::TerminalRead{id, data});
                         }
                     }
@@ -128,8 +127,8 @@ pub mod app_state {
             let msgclone = message.clone();
             app.listen("tart://result", move |evt| {
                 if let Ok(result) = serde_json::from_str::<CommandResult>(evt.payload()) {
-                    if result.id == msgclone.id {
-                        let _ = tx.send(result);
+                    if result.id.to_string() == msgclone.id.to_string() {
+                        let _ = tx.try_send(result);
                     }
                 }
             });
