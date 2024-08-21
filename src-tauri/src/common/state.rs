@@ -126,6 +126,7 @@ pub mod app_state {
 
                         },
                         AppCommand::WriteData { id, ref data } => {
+                            println!("Writing {:?} to {:?}", data.clone(), id);
                             match terminals.sender(id) {
                                 Some(sender) => match sender.send(TerminalMessage::new(TerminalCommand::Write(data.clone()))) {
                                     Ok(_) => {

@@ -1,12 +1,17 @@
 pub mod term {
     use core::str;
-    use std::{collections::HashMap, io::{BufRead, BufReader, Read, Write}, sync::{Arc, Mutex}, thread::{self, JoinHandle}};
+    use std::{
+        collections::HashMap,
+        io::{BufRead, BufReader, Read, Write},
+        sync::{Arc, Mutex},
+        thread::{self, spawn, JoinHandle},
+    };
 
+    use crossbeam_channel::{unbounded, Receiver, Sender, TrySendError};
     use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize, SlavePty};
     use serde::{Deserialize, Serialize};
     use tauri::{AppHandle, Emitter};
     use uuid::Uuid;
-    use crossbeam_channel::{unbounded, Receiver, Sender, TrySendError};
 
     use crate::common::app_state::BackendEvent;
 
@@ -14,33 +19,41 @@ pub mod term {
     #[serde(tag = "type")]
     pub enum TerminalCommand {
         Kill,
-        TerminalFailure{id: Uuid, reason: String},
+        TerminalFailure {
+            id: Uuid,
+            reason: String,
+        },
         Write(String),
         Read(String),
-        Error{scope: String, reason: String},
+        Error {
+            scope: String,
+            reason: String,
+        },
 
         #[serde(with = "PtySizeDef")]
-        Resize{size: PtySize}
+        Resize {
+            size: PtySize,
+        },
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub struct TerminalMessage {
         pub id: Uuid,
-        pub command: TerminalCommand
+        pub command: TerminalCommand,
     }
 
     impl TerminalMessage {
         pub fn new(command: TerminalCommand) -> Self {
             TerminalMessage {
                 id: Uuid::new_v4(),
-                command
+                command,
             }
         }
 
         pub fn result(&self, command: TerminalCommand) -> Self {
             TerminalMessage {
                 id: self.id,
-                command
+                command,
             }
         }
     }
@@ -51,7 +64,7 @@ pub mod term {
         rows: u16,
         cols: u16,
         pixel_width: u16,
-        pixel_height: u16
+        pixel_height: u16,
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -62,7 +75,7 @@ pub mod term {
         pub title: Option<String>,
 
         #[serde(with = "PtySizeDef")]
-        pub size: PtySize
+        pub size: PtySize,
     }
 
     #[allow(dead_code)]
@@ -71,19 +84,46 @@ pub mod term {
         pub target: Box<dyn SlavePty>,
         pub reader: BufReader<Box<dyn Read + Send>>,
         pub writer: Box<dyn Write + Send>,
-        pub process: Box<dyn Child>
+        pub process: Box<dyn Child>,
+    }
+
+    #[derive(Clone, Debug)]
+    pub enum ReadEvent {
+        Kill,
+        Data(String)
     }
 
     #[derive(Clone, Debug)]
     pub struct Terminal {
         _info: TerminalInfo,
         pub commands: (Sender<TerminalMessage>, Receiver<TerminalMessage>),
-        pub results: (Sender<TerminalMessage>, Receiver<TerminalMessage>)
+        pub results: (Sender<TerminalMessage>, Receiver<TerminalMessage>),
     }
 
     impl Terminal {
-        pub fn new(commands: (Sender<TerminalMessage>, Receiver<TerminalMessage>), results: (Sender<TerminalMessage>, Receiver<TerminalMessage>), command: String, args: Option<Vec<String>>, title: Option<String>) -> Self {
-            Terminal { _info: TerminalInfo { id: Uuid::new_v4(), command, args, title, size: PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 } }, commands, results }
+        pub fn new(
+            commands: (Sender<TerminalMessage>, Receiver<TerminalMessage>),
+            results: (Sender<TerminalMessage>, Receiver<TerminalMessage>),
+            command: String,
+            args: Option<Vec<String>>,
+            title: Option<String>,
+        ) -> Self {
+            Terminal {
+                _info: TerminalInfo {
+                    id: Uuid::new_v4(),
+                    command,
+                    args,
+                    title,
+                    size: PtySize {
+                        rows: 24,
+                        cols: 80,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    },
+                },
+                commands,
+                results,
+            }
         }
 
         pub fn id(&self) -> Uuid {
@@ -94,11 +134,18 @@ pub mod term {
             self._info.clone()
         }
 
-        pub fn send_event(&self, command: TerminalCommand) -> Result<(), TrySendError<TerminalMessage>> {
+        pub fn send_event(
+            &self,
+            command: TerminalCommand,
+        ) -> Result<(), TrySendError<TerminalMessage>> {
             self.results.0.try_send(TerminalMessage::new(command))
         }
 
-        pub fn send_result(&self, message: TerminalMessage, command: TerminalCommand) -> Result<(), TrySendError<TerminalMessage>> {
+        pub fn send_result(
+            &self,
+            message: TerminalMessage,
+            command: TerminalCommand,
+        ) -> Result<(), TrySendError<TerminalMessage>> {
             self.results.0.try_send(message.result(command))
         }
 
@@ -122,7 +169,13 @@ pub mod term {
                     let reader = pair.master.try_clone_reader();
                     let writer = pair.master.take_writer();
                     if reader.is_ok() && writer.is_ok() {
-                        Ok(TerminalContext { handle: pair.master, target: pair.slave, reader: BufReader::new(reader.unwrap()), writer: writer.unwrap(), process: child })
+                        Ok(TerminalContext {
+                            handle: pair.master,
+                            target: pair.slave,
+                            reader: BufReader::new(reader.unwrap()),
+                            writer: writer.unwrap(),
+                            process: child,
+                        })
                     } else {
                         Err("Failed to get IO handles".to_string())
                     }
@@ -137,51 +190,94 @@ pub mod term {
         pub fn run_loop(&self, app: AppHandle) -> () {
             match self.get_pty() {
                 Ok(mut context) => {
-                    loop {
-                        if let Some(cmd) = self.recv_command() {
-                            match cmd.clone().command {
-                                TerminalCommand::Kill => {
-                                    let _ = context.process.kill();
+                    let (tx, rx) = crossbeam_channel::unbounded::<ReadEvent>();
+                    let tx_inner = tx.clone();
+                    let rx_inner = rx.clone();
+                    let mut reader = context.reader;
+                    spawn(move || {
+                        loop {
+                            if let Ok(e) = rx_inner.try_recv() {
+                                if let ReadEvent::Kill = e {
                                     break;
-                                },
-                                TerminalCommand::Write(data) => {
-                                    if let Err(_) = context.writer.write_all(data.as_bytes()) {
-                                        let _ = self.send_result(cmd.clone(), TerminalCommand::Error { scope: "pty".to_string(), reason: "write_failure".to_string() });
-                                    }
-                                },
-                                TerminalCommand::Resize { size } => {
-                                    if let Err(_) = context.handle.resize(size) {
-                                        let _ = self.send_result(cmd.clone(), TerminalCommand::Error { scope: "pty".to_string(), reason: "resize_failure".to_string() });
-                                    }
                                 }
-                                _ => ()
                             }
-                        }
 
-                        let data = {
-                            if let Ok(data) = context.reader.fill_buf() {
-                                if data.len() > 0 {
-                                    if let Ok(parsed) = str::from_utf8(data) {
-                                        Some(parsed.to_string())
+                            let data = {
+                                if let Ok(data) = reader.fill_buf() {
+                                    if data.len() > 0 {
+                                        if let Ok(parsed) = str::from_utf8(data) {
+                                            Some(parsed.to_string())
+                                        } else {
+                                            None
+                                        }
                                     } else {
                                         None
                                     }
                                 } else {
                                     None
                                 }
-                            } else {
-                                None
-                            }
-                        };
+                            };
 
-                        if let Some(d) = data {
-                            context.reader.consume(d.len());
-                            let _ = app.emit("tart://internal", BackendEvent::TerminalRead { id: self.id(), data: d });
+                            if let Some(d) = data {
+                                reader.consume(d.len());
+                                let _ = tx_inner.send(ReadEvent::Data(d));
+                            }
+                        }
+                    });
+                    loop {
+                        if let Some(cmd) = self.recv_command() {
+                            match cmd.clone().command {
+                                TerminalCommand::Kill => {
+                                    let _ = context.process.kill();
+                                    break;
+                                }
+                                TerminalCommand::Write(data) => {
+                                    println!("WRITING {:?}", data);
+                                    if let Err(e) = context.writer.write_all(data.as_bytes()) {
+                                        println!("{:?}", e);
+                                        let _ = self.send_result(
+                                            cmd.clone(),
+                                            TerminalCommand::Error {
+                                                scope: "pty".to_string(),
+                                                reason: "write_failure".to_string(),
+                                            },
+                                        );
+                                    }
+                                }
+                                TerminalCommand::Resize { size } => {
+                                    if let Err(_) = context.handle.resize(size) {
+                                        let _ = self.send_result(
+                                            cmd.clone(),
+                                            TerminalCommand::Error {
+                                                scope: "pty".to_string(),
+                                                reason: "resize_failure".to_string(),
+                                            },
+                                        );
+                                    }
+                                }
+                                _ => (),
+                            }
+                        }
+
+                        if let Ok(evt) = rx.try_recv() {
+                            if let ReadEvent::Data(data) = evt {
+                                let _ = app.emit(
+                                    "tart://internal",
+                                    BackendEvent::TerminalRead {
+                                        id: self.id(),
+                                        data,
+                                    },
+                                );
+                            }
                         }
                     }
-                },
+                    let _ = tx.try_send(ReadEvent::Kill);
+                }
                 Err(reason) => {
-                    let _ = self.send_event(TerminalCommand::TerminalFailure { id: self.id(), reason });
+                    let _ = self.send_event(TerminalCommand::TerminalFailure {
+                        id: self.id(),
+                        reason,
+                    });
                 }
             };
         }
@@ -190,25 +286,43 @@ pub mod term {
     #[derive(Clone, Debug)]
     pub struct TerminalManager {
         terminals: Arc<Mutex<HashMap<Uuid, Terminal>>>,
-        threads: Arc<Mutex<HashMap<Uuid, JoinHandle<()>>>>
+        threads: Arc<Mutex<HashMap<Uuid, JoinHandle<()>>>>,
     }
 
     impl TerminalManager {
         pub fn new() -> Self {
-            TerminalManager { terminals: Arc::new(Mutex::new(HashMap::new())), threads: Arc::new(Mutex::new(HashMap::new())) }
+            TerminalManager {
+                terminals: Arc::new(Mutex::new(HashMap::new())),
+                threads: Arc::new(Mutex::new(HashMap::new())),
+            }
         }
 
-        pub fn create_terminal(&mut self, app: AppHandle, command: String, args: Option<Vec<String>>, title: Option<String>) -> Result<Terminal, &str> {
+        pub fn create_terminal(
+            &mut self,
+            app: AppHandle,
+            command: String,
+            args: Option<Vec<String>>,
+            title: Option<String>,
+        ) -> Result<Terminal, &str> {
             let commands = unbounded::<TerminalMessage>();
             let results = unbounded::<TerminalMessage>();
-            let term = Terminal::new((commands.0.clone(), commands.1.clone()), (results.0.clone(), results.1.clone()), command, args, title);
+            let term = Terminal::new(
+                (commands.0.clone(), commands.1.clone()),
+                (results.0.clone(), results.1.clone()),
+                command,
+                args,
+                title,
+            );
             if let Ok(mut terminals) = self.terminals.lock() {
                 if let Ok(mut threads) = self.threads.lock() {
                     let cloned = term.clone();
                     terminals.insert(term.clone().id(), term.clone());
-                    threads.insert(term.clone().id(), thread::spawn(move || term.run_loop(app.clone())));
+                    threads.insert(
+                        term.clone().id(),
+                        thread::spawn(move || term.run_loop(app.clone())),
+                    );
                     return Ok(cloned);
-                }   
+                }
                 return Err("Failed to lock threads mapping");
             }
             return Err("Failed to lock terminals mapping");
@@ -224,7 +338,7 @@ pub mod term {
                         }
                         let _ = terminals.remove(&id);
                     }
-                }   
+                }
             }
         }
 
